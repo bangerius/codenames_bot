@@ -3,10 +3,8 @@ from enum import StrEnum
 from itertools import combinations
 import os
 from random import shuffle
-from typing import cast
 
-import gensim.downloader as api
-from gensim.models.keyedvectors import KeyedVectors
+from embeddings import default_model_name_for_language, load_embedding_model
 
 
 class CellRole(StrEnum):
@@ -34,29 +32,58 @@ class Player(StrEnum):
     PLAYER2 = "player2"
 
 
-def main():
+def main(lang: str = "sv"):
     width = 5
     height = 5
-    word_gen = word_producer
-    color_gen = color_producer
+    lang = lang.lower()
+    word_gen = word_producer(lang=lang)
+    color_gen = color_producer()
     game_board = GameBoard(width, height, word_gen, color_gen)
     game_board.print_game_board(player_perspective=Player.PLAYER1)
     # print("Correct words: " + ", ".join(game_board.get_correct_words(player_perspective=Player.PLAYER1)))
     # print("Incorrect words: " + ", ".join(game_board.get_incorrect_words(player_perspective=Player.PLAYER1)))
     # print("Assassin words: " + ", ".join(game_board.get_assassin_words(player_perspective=Player.PLAYER1)))
-    bot = HintBot()
-    hint = bot.get_hint(
+    bot1 = HintBot(
+        lang=lang,
+        settings={
+            "debug_level": 0,
+            "correct_boost": 1.0,
+            "assassin_penalty": 5,
+        },
+    )
+    bot2 = HintBot(
+        lang=lang,
+        settings={
+            "debug_level": 0,
+            "correct_boost": 3.0,
+            "assassin_penalty": 5,
+        },
+    )
+    hint1 = bot1.get_hint(
         correct_words=game_board.get_correct_words(player_perspective=Player.PLAYER1),
         incorrect_words=game_board.get_incorrect_words(player_perspective=Player.PLAYER1),
         assassin_words=game_board.get_assassin_words(player_perspective=Player.PLAYER1),
-        target_n_words=3,
+        target_n_words=2,
     )
-    print(f"Suggested hints: {hint}")
+    hint2 = bot2.get_hint(
+        correct_words=game_board.get_correct_words(player_perspective=Player.PLAYER1),
+        incorrect_words=game_board.get_incorrect_words(player_perspective=Player.PLAYER1),
+        assassin_words=game_board.get_assassin_words(player_perspective=Player.PLAYER1),
+        target_n_words=2,
+    )
+    print(f"Bot 1: {hint1}")
+    print(f"Bot 2: {hint2}")
+    input("Press Enter to show target words...")
+    print(bot1.last_target_words)
 
 
-def word_producer():
-    with open("word_list.txt", "r") as file:
-        words = [line.strip().lower() for line in file.readlines() if " " not in line.strip()]
+def word_producer(lang: str = "en") -> Generator[str]:
+    file = {
+        "en": "word_list.txt",
+        "sv": "word_list_swe.txt",
+    }
+    with open(file[lang], "r") as f:
+        words = [line.strip().lower() for line in f.readlines() if " " not in line.strip()]
     shuffle(words)
     yield from words
 
@@ -148,13 +175,13 @@ class GameBoard:
         self,
         width: int,
         height: int,
-        word_producer: Callable = word_producer,
-        color_producer: Callable = color_producer,
+        word_producer: Generator[str, None, None],
+        color_producer: Generator[tuple[CellRole, CellRole], None, None],
     ):
         self.width = width
         self.height = height
-        self.word_producer = word_producer()
-        self.color_producer = color_producer()
+        self.word_producer = word_producer
+        self.color_producer = color_producer
         self.cells = [
             [GameCell(next(self.word_producer), *next(self.color_producer)) for _ in range(width)]
             for _ in range(height)
@@ -207,24 +234,22 @@ class GameBoard:
 
 
 class HintBot:
-    def __init__(self, model_name: str = "fasttext-wiki-news-subwords-300", settings: dict = {}):
+    def __init__(
+        self, lang: str = "en", settings: dict | None = None, model_name: str | None = None
+    ):
+        self.lang = lang.lower()
+        self.model_name = model_name or default_model_name_for_language(self.lang)
+
         default_settings = {
             "debug_level": 1,  # 0 = no debug output, 1 = some debug output, 2 = verbose debug output
             "max_suggestions_from_model": 64,  # Maximum number of suggestions to retrieve from the model before giving up on finding a valid hint
             "assassin_penalty": 5,  # Penalty multiplier for assassin words when calculating the negative vector
             "correct_boost": 1.5,  # Boost multiplier for correct words when calculating the combined vector for the hint
         }
-        self.settings = {**default_settings, **settings}
-        binary_path = f"{model_name}.bin"
-        if not os.path.exists(binary_path):
-            print("Loading raw model for the first time...")
-            self.model = cast(KeyedVectors, api.load(model_name))
-            self.model.sort_by_descending_frequency()
-            # Save as a tight binary format
-            self.model.save_word2vec_format(binary_path, binary=True)
-        else:
-            print("Loading model from binary file...")
-            self.model = KeyedVectors.load_word2vec_format(binary_path, binary=True)
+        self.settings = {**default_settings, **(settings or {})}
+        self.model = load_embedding_model(self.lang, self.model_name)
+        self.last_hint = None
+        self.last_target_words = None
 
     def log(self, message: str, level: int = 1):
         if self.settings["debug_level"] >= level:
@@ -238,9 +263,11 @@ class HintBot:
         target_n_words: int = 3,
     ) -> str:
         target_words = self.choose_best_collection(correct_words, assassin_words, target_n_words)
+        self.last_target_words = target_words
         self.log(f"Chose word subset for hint: {target_words}", 1)
         hints = self.construct_hint(target_words, incorrect_words, assassin_words)
         self.log(f"Suggested hints: {hints}", 1)
+        self.last_hint = hints[0] if hints else None
         return hints[0]
 
     def choose_best_collection(
@@ -305,8 +332,9 @@ class HintBot:
                     options.append(suggestion)
             if len(options) >= 1:
                 break
-            print(
-                f"No valid suggestions found with topn={top_n} (suggestions: {suggestions}), increasing topn..."
+            self.log(
+                f"No valid suggestions found with topn={top_n} (suggestions: {suggestions}), increasing topn...",
+                1,
             )
             top_n *= 2
         return options
