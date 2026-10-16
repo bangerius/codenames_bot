@@ -220,5 +220,5 @@ __marimo__/
 # cached vector embeddings etc.
 *.bin
 *.bin.gz
-*.parquet # This may be a bit overkill. Might want to reduce to specific directories or files
+*.parquet
 *.bin.gz.part
