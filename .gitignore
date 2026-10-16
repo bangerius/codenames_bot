@@ -218,7 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # cached vector embeddings etc.
-.bin
-.bin.gz
-.parquet # This may be a bit overkill. Might want to reduce to specific directories or files
-.bin.gz.part
+*.bin
+*.bin.gz
+*.parquet # This may be a bit overkill. Might want to reduce to specific directories or files
+*.bin.gz.part
